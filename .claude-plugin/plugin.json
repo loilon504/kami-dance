@@ -1,0 +1,22 @@
+{
+  "name": "kami-dance",
+  "version": "0.6.0",
+  "author": { "name": "loilon504" },
+  "description": "The Loli Kami Requiem dancer over empty room in the chat and in the red and green rows of a file change's diff, a real picture in kitty and Ghostty, block characters elsewhere: she stands on a small stand, resting on a line of words where one runs under it, walks left and right at the right of the room, scrolls with the words and moves on when her spot leaves the screen",
+  "userConfig": {
+    "size": {
+      "type": "string",
+      "title": "Dancer height (rows of text)",
+      "description": "How many rows of text tall the dancer is",
+      "options": ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
+      "default": "4"
+    },
+    "style": {
+      "type": "string",
+      "title": "Dancer style",
+      "description": "How a text cell is split into dots: half (2), sextant (6), octant (8), braille (8 dots). /dance-styles shows them side by side",
+      "options": ["half", "sextant", "octant", "braille"],
+      "default": "half"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "kami-dance",
+  "owner": { "name": "loilon504" },
+  "description": "kami-dance, a Claude Code mod: a dancing girl in the chat",
+  "plugins": [
+    {
+      "name": "kami-dance",
+      "source": "./",
+      "description": "The Loli Kami Requiem dancer in the empty room of the Claude Code chat and its diffs"
+    }
+  ]
+}
