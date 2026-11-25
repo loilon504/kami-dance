@@ -1,9 +1,16 @@
 {
   "name": "kami-dance",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "author": { "name": "loilon504" },
-  "description": "The Loli Kami Requiem dancer over empty room in the chat and in the red and green rows of a file change's diff, a real picture in kitty and Ghostty, block characters elsewhere: she stands on a small stand, resting on a line of words where one runs under it, walks left and right at the right of the room, scrolls with the words and moves on when her spot leaves the screen",
+  "description": "The Loli Kami Requiem dancer over empty room in the chat and in the red and green rows of a file change's diff, a real picture in kitty and Ghostty, sextant block characters elsewhere: she stands on a small stand, resting on a line of words where one runs under it, walks left and right at the right of the room, scrolls with the words and moves on when her spot leaves the screen. /dance opens her settings",
   "userConfig": {
+    "show": {
+      "type": "string",
+      "title": "Show the dancer",
+      "description": "on: she dances in the chat; off: hidden (/dance on, /dance off)",
+      "options": ["on", "off"],
+      "default": "on"
+    },
     "size": {
       "type": "string",
       "title": "Dancer height (rows of text)",
@@ -11,12 +18,33 @@
       "options": ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
       "default": "4"
     },
-    "style": {
+    "pictures": {
       "type": "string",
-      "title": "Dancer style",
-      "description": "How a text cell is split into dots: half (2), sextant (6), octant (8), braille (8 dots). /dance-styles shows them side by side",
-      "options": ["half", "sextant", "octant", "braille"],
-      "default": "half"
+      "title": "Real pictures",
+      "description": "auto: a real picture where the terminal draws one (kitty, Ghostty), sextant block characters elsewhere; off: block characters everywhere, lighter on a machine with no graphics card",
+      "options": ["auto", "off"],
+      "default": "auto"
+    },
+    "places": {
+      "type": "string",
+      "title": "Where she dances",
+      "description": "all: beside messages and in file changes' diffs; messages: beside messages only; diffs: in diffs only",
+      "options": ["all", "messages", "diffs"],
+      "default": "all"
+    },
+    "walk": {
+      "type": "string",
+      "title": "Walking",
+      "description": "on: she walks left and right; off: she dances in place",
+      "options": ["on", "off"],
+      "default": "on"
+    },
+    "autoTheme": {
+      "type": "string",
+      "title": "Diff colours under the auto theme",
+      "description": "Under Claude's auto theme a mod cannot tell a light terminal from a dark one: say which, so the cells around her in a diff match its red and green rows",
+      "options": ["light", "dark"],
+      "default": "light"
     }
   }
 }
