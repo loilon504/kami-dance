@@ -18,7 +18,7 @@ theo chữ.
 
 ```sh
 claude update
-claude plugin install kami-dance --marketplace loilon504/kami-dance --scope user --config size=12 --config style=sextant
+claude plugin install kami-dance --marketplace loilon504/kami-dance --scope user --config size=12
 ```
 
 Nếu được hỏi `Add marketplace?` thì gõ `y`.
@@ -45,8 +45,8 @@ echo "alias claude-kami='CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 claude'" >> ~/.zshr
 Từ giờ trong herdr gõ `claude-kami` thay cho `claude`. Mở Claude thẳng trong Ghostty (không qua herdr) thì gõ
 `claude` như thường.
 
-Ảnh động cần card đồ họa. Ghostty chạy không có card đồ họa (ví dụ trong WSL) sẽ tốn nhiều CPU: khi đó dùng
-`claude` thường (cô vẽ bằng ký tự khối) hoặc tắt cô bằng `/dance off`.
+Ảnh động cần card đồ họa. Ghostty chạy không có card đồ họa (ví dụ trong WSL) sẽ tốn nhiều CPU: khi đó gõ
+`/dance` và chọn "Ảnh thật: tắt" (cô vẽ bằng ký tự khối), hoặc ẩn cô bằng `/dance off`.
 
 ## Cài trên Windows (Claude Code CLI)
 
@@ -54,7 +54,7 @@ Từ giờ trong herdr gõ `claude-kami` thay cho `claude`. Mở Claude thẳng 
 
 ```powershell
 claude update
-claude plugin install kami-dance --marketplace loilon504/kami-dance --scope user --config size=12 --config style=sextant
+claude plugin install kami-dance --marketplace loilon504/kami-dance --scope user --config size=12
 ```
 
 Nếu được hỏi `Add marketplace?` thì gõ `y`.
@@ -65,24 +65,34 @@ Nếu được hỏi `Add marketplace?` thì gõ `y`.
 /tui fullscreen
 ```
 
-Windows Terminal vẽ cô bằng ký tự khối. Nếu thấy ô vuông hay dấu hỏi thay cho hình, font của bạn thiếu ký tự đó:
-gõ `/dance-styles` để xem kiểu nào hiện đúng, rồi đổi sang kiểu đó, ví dụ `/dance half` (kiểu `half` hiện được ở
-mọi nơi).
+Windows Terminal vẽ cô bằng ký tự khối sextant (mỗi ô chữ chia sáu chấm). Nếu thấy ô vuông hay dấu hỏi thay cho
+hình, font của bạn thiếu các ký tự đó: đổi sang font có chúng, hoặc ẩn cô bằng `/dance off`.
 
 ## Dùng
 
-Gõ trong Claude:
+Gõ `/dance` để mở bảng cài đặt. Tab hoặc phím mũi tên để đi giữa các nút, Enter để chọn, Esc (hoặc gõ `/dance`
+lần nữa) để đóng. Trong bảng:
+
+| Dòng | Chọn |
+|---|---|
+| Cô bé | hiện, ẩn |
+| Cao | `−` `+`, từ 3 đến 15 dòng |
+| Ảnh thật | khi terminal vẽ được (kitty, Ghostty), hoặc tắt: luôn vẽ bằng ký tự khối sextant, nhẹ máy hơn |
+| Nhảy ở | tin nhắn và diff, chỉ tin nhắn, chỉ diff |
+| Đi lại | có, hoặc đứng yên nhảy tại chỗ |
+| Theme auto | nền sáng, nền tối (xem "Theme sáng và tối" dưới đây) |
+
+Dưới bảng có hình cô theo cỡ đang chọn.
+
+Gõ nhanh, không cần mở bảng:
 
 | Gõ | Tác dụng |
 |---|---|
-| `/dance` | bật hoặc tắt cô bé |
-| `/dance on`, `/dance off` | bật, tắt |
+| `/dance on`, `/dance off` | hiện, ẩn cô bé |
 | `/dance 12` | cao 12 dòng (từ 3 đến 15) |
-| `/dance sextant` | kiểu vẽ: `half`, `sextant`, `octant`, `braille` |
-| `/dance 12 sextant` | đổi cả hai |
-| `/dance-styles` | xem các kiểu vẽ cạnh nhau |
+| `/dance on 12` | cả hai |
 
-Cỡ và kiểu được lưu lại, dùng cho mọi phiên sau.
+Mọi cài đặt được lưu, dùng cho mọi phiên sau (chúng cũng có trong `/config`). Mỗi lần đổi, mod nạp lại.
 
 ## Cô bé hiện ở đâu
 
@@ -94,8 +104,9 @@ Cỡ và kiểu được lưu lại, dùng cho mọi phiên sau.
 
 ## Theme sáng và tối
 
-Màu nền sau lưng cô trong diff được làm cho theme sáng và theme tối. Theme `auto` được coi là sáng. Terminal nền
-tối thì chọn theme tối: gõ `/config`, mục Theme, chọn Dark.
+Màu nền sau lưng cô trong diff được làm cho theme sáng và theme tối. Với theme `auto`, mod không biết nền terminal
+sáng hay tối nên coi là sáng. Terminal nền tối thì gõ `/dance` và chọn "Theme auto: nền tối" (hoặc đổi theme của
+Claude sang Dark: gõ `/config`, mục Theme).
 
 ## Cập nhật và gỡ
 
@@ -127,8 +138,9 @@ Nhật ký ghi cỡ hình đã nạp, từng tin nhắn và diff có chỗ đứ
 
 ## Cho người sửa mod
 
-- `hooks/register.tsx`: tìm chỗ đứng, đi lại, đổi cỡ bằng `/dance`.
+- `hooks/register.tsx`: tìm chỗ đứng, đi lại, bảng cài đặt `/dance` (mỗi dòng là một mục `userConfig` trong
+  `.claude-plugin/plugin.json`).
 - `hooks/dancer.tsx`: vẽ cô bằng ký tự khối.
-- `assets/png`: 418 khung hình gốc. `assets/sprites`: hình ký tự khối từng kiểu và cỡ, dựng bằng
-  `tools/blocks.py`. `assets/walk-7`: khung đi từng phần tư cột ở cỡ 7 cho ảnh thật, dựng bằng `tools/walk.py`.
+- `assets/png`: 418 khung hình gốc. `assets/sprites`: hình ký tự khối sextant từng cỡ, dựng bằng
+  `tools/blocks.py` (`python -I tools/blocks.py build . sextant <cỡ>`). `assets/walk-7`: khung đi từng phần tư cột ở cỡ 7 cho ảnh thật, dựng bằng `tools/walk.py`.
 - Chạy thử: `claude plugin test .` và `claude plugin validate .`

@@ -3,13 +3,21 @@ import type { EngineInterface, Register, RenderNode } from 'claude-code'
 // The dancer of "Shukusei!! Loli Kami Requiem" over the chat.
 //
 // She rides inside one transcript row's drawing, in a box laid over empty
-// room to the right of its words, so she scrolls with them. Two kinds of row
-// host her: an assistant message, whose rows are guessed from its markdown,
-// and a file change's diff (Edit, Write), whose rows come from its patch.
-// Each guess is checked against the rows the terminal really laid out
-// (`onScreen.of`); only a row whose guess holds can host her. In a diff she
-// stands in the empty right end of the red and green rows, her empty cells
-// painted in the row's colour.
+// room to the right of its words, so she scrolls with them. Her box is in the
+// row's flow, after the engine's drawing, pulled up over it by a negative top
+// margin and given back by its bottom one, so the row keeps its height. It is
+// not `position: "absolute"`: the terminal pins an absolute box whose top is
+// above the screen to the screen's top row (2.1.332), so scrolling down would
+// drag her along until her spot left the screen.
+//
+// Two kinds of row host her: an assistant message, whose rows are guessed
+// from its markdown, and a file change's diff (Edit, Write), whose rows come
+// from its patch. Each guess is checked against the rows the terminal really
+// laid out (`onScreen.of`). A diff hosts her only where its guess holds. A
+// message whose guess misses by up to DRIFT rows still hosts her, on her stand
+// in the air, where the words stay clear of her wherever the miss is. In a
+// diff she stands in the empty right end of the red and green rows, her empty
+// cells painted in the row's colour.
 //
 // Each row keeps every spot its gaps hold: on her stand, a thin disc one row
 // under her feet, resting on a line of words where one runs under it, else
@@ -23,9 +31,14 @@ import type { EngineInterface, Register, RenderNode } from 'claude-code'
 // tools/walk.py has built (assets/walk-<rows>) she walks a quarter column at
 // a time: her box is a column wider than she is, the frames come shifted by
 // quarters inside it, and the box moves a whole column on a redraw. At other
-// heights she steps whole columns with the plain frames in assets/png.
-// Elsewhere she is drawn in block characters from assets/sprites/<style>-
-// <height>.json (heights 3 to 8 as first drawn, 9 to 15 by tools/blocks.py) by
+// heights she steps whole columns with the plain frames in assets/png. A
+// picture's cells are text the terminal paints the picture over, its clear
+// pixels showing the cells' ground: over a diff's red and green rows she is
+// cut into strips, one for each run of rows of one colour, each strip the
+// whole picture in a box of that colour that shows only its rows (STRIPS at
+// most, as each strip is a picture of its own to swap). Elsewhere she is
+// drawn in sextant block characters (a cell split into six dots) from
+// assets/sprites/sextant-<height>.json (built by tools/blocks.py) by
 // `./dancer.tsx`, which animates her where the terminal draws, on its own
 // frame clock, and her stand is a row of thin bars.
 //
@@ -64,8 +77,17 @@ type Kind = 'message' | 'diff'
 
 // A row as the guess lays it out: the last column each of its rows uses, the
 // colour that fills a row to `right` (a diff's red and green), and the column
-// her room ends at.
-type Laid = { rows: number[]; bands: (string | undefined)[]; right: number }
+// her room ends at. `isLoose`: the guess missed the rows laid out, and `rows`
+// are as wide as any guessed row that could have shifted there, so no row of
+// words is sure to be under her.
+type Laid = { rows: number[]; bands: (string | undefined)[]; right: number; isLoose?: boolean }
+
+// What else a spot must meet: words to stand on are known (a guess that held),
+// and a top whose rows the picture can be drawn over.
+type Rules = { canGround: boolean; fits: (top: number) => boolean }
+
+// A run of her rows over one ground, `from` to `to` (not included).
+type Run = { from: number; to: number; band: string | undefined }
 
 type Site = {
   id: string
@@ -96,6 +118,13 @@ const ROAM = 32 // columns she walks over, at the right end of her room
 const STRIDE = 6 // the shortest walk, in columns
 const PAUSE_MIN = 24 // ticks she dances in place between walks: 2 s ...
 const PAUSE_SPREAD = 60 // ... to 7 s; a tick is a picture frame, and she walks a quarter column a tick
+// Rows a message's guess may miss its laid-out rows by and still host her. A
+// long message misses most often (a line wrapped one word sooner, a blank row
+// the markdown guess does not know), and it holds the most room.
+const DRIFT = 3
+// Strips her picture is cut into at most over a diff's coloured rows: each is
+// a picture the terminal decodes again on every frame.
+const STRIPS = 3
 const STAND_COLOR = '#f2a6c8'
 // A diff as the terminal draws it (2.1.329): each line is 5 columns of
 // indent, a space, its line number padded to the hunk's widest, a space and
@@ -108,46 +137,123 @@ const DIFF_RIGHT = 7
 // each theme (2.1.329), which are not the theme's own diffRemoved and
 // diffAdded. A 256-colour terminal rounds them as it does the diff's (52 and
 // 22; 224 and 194). `auto` follows the terminal's ground, which a mod cannot
-// read: it is taken as light, the theme this mod's owner uses. Under another
-// theme the rows' colour is unknown and a diff hosts her only beside the
-// rows it leaves uncoloured.
+// read: it is taken as the person's `autoTheme` setting, light unless they
+// say. Under another theme the rows' colour is unknown and a diff hosts her
+// only beside the rows it leaves uncoloured.
 type Grounds = { removed: string; added: string }
 const DIFF_GROUNDS: Record<string, Grounds> = {
   light: { removed: '#ffdcdc', added: '#dcffdc' },
-  auto: { removed: '#ffdcdc', added: '#dcffdc' },
   dark: { removed: '#3d0100', added: '#022800' },
 }
 // The mod writes its log only where KAMI_DANCE_LOG names a file for it, each
 // session its own.
-const STYLES_PANE = 'kami-styles'
-// What `/dance` takes, as the mod's /config rows (plugin.json) offer it.
+const SETTINGS_PANE = 'kami-settings'
+// The one style of block characters she is drawn in: a cell split into six
+// dots (assets/sprites/sextant-<height>.json).
+const STYLE = 'sextant'
+
+// ---- what the person sets ---------------------------------------------------
+
+// Every setting is one of the mod's /config rows (plugin.json's userConfig,
+// the same field names and values) and one row of the /dance menu. A change
+// is written to its /config row, which reloads the mod with it.
+type Settings = {
+  show: string // on, off
+  size: string // her height in rows, 3 to 15
+  pictures: string // auto: a real picture where the terminal draws one; off: block characters everywhere
+  places: string // all, messages, diffs
+  walk: string // on: she walks left and right; off: she dances in place
+  autoTheme: string // light, dark: the diff's colours under the `auto` theme
+}
+type Field = keyof Settings
+type Choice = { value: string; label: string }
+type Setting = { field: Field; label: string; choices: Choice[] }
+
 const SIZES = Array.from({ length: 13 }, (_, i) => String(i + 3))
-const STYLES = ['half', 'sextant', 'octant', 'braille']
+// The menu's rows, top to bottom; a choice's label is what the menu draws.
+const SETTINGS: Setting[] = [
+  {
+    field: 'show',
+    label: 'Cô bé',
+    choices: [
+      { value: 'on', label: 'hiện' },
+      { value: 'off', label: 'ẩn' },
+    ],
+  },
+  { field: 'size', label: 'Cao', choices: SIZES.map(value => ({ value, label: `${value} dòng` })) },
+  {
+    field: 'pictures',
+    label: 'Ảnh thật',
+    choices: [
+      { value: 'auto', label: 'khi terminal vẽ được' },
+      { value: 'off', label: 'tắt' },
+    ],
+  },
+  {
+    field: 'places',
+    label: 'Nhảy ở',
+    choices: [
+      { value: 'all', label: 'tin nhắn và diff' },
+      { value: 'messages', label: 'tin nhắn' },
+      { value: 'diffs', label: 'diff' },
+    ],
+  },
+  {
+    field: 'walk',
+    label: 'Đi lại',
+    choices: [
+      { value: 'on', label: 'có' },
+      { value: 'off', label: 'đứng yên' },
+    ],
+  },
+  {
+    field: 'autoTheme',
+    label: 'Theme auto',
+    choices: [
+      { value: 'light', label: 'nền sáng' },
+      { value: 'dark', label: 'nền tối' },
+    ],
+  },
+]
+const DEFAULTS: Settings = {
+  show: 'on',
+  size: '4',
+  pictures: 'auto',
+  places: 'all',
+  walk: 'on',
+  autoTheme: 'light',
+}
+// Columns of the menu's labels, the widest and a gap.
+const LABEL_COLS = 12
+
+// The settings `options` hold, a value no row offers taken as its default.
+function settingsOf(options: Readonly<Record<string, unknown>>): Settings {
+  const settings = { ...DEFAULTS }
+  for (const { field, choices } of SETTINGS) {
+    const value = options[field]
+    if (typeof value === 'string' && choices.some(choice => choice.value === value)) {
+      settings[field] = value
+    }
+  }
+
+  return settings
+}
+
+function choiceOf(field: Field, value: string): string {
+  return SETTINGS.find(setting => setting.field === field)?.choices.find(choice => choice.value === value)?.label ?? value
+}
+
 const DANCE_HELP = [
   'Cách dùng /dance:',
-  '  /dance               bật hoặc tắt cô bé',
-  '  /dance on | off      bật, tắt',
+  '  /dance               mở bảng cài đặt: hiện hay ẩn, cao, ảnh thật, nhảy ở đâu,',
+  '                       đi lại, nền diff khi theme auto (gõ lại để đóng)',
+  '  /dance on | off      hiện, ẩn cô bé',
   '  /dance 6             cao 6 dòng (3 đến 15)',
-  '  /dance octant        kiểu vẽ: half, sextant, octant, braille',
-  '  /dance 6 octant      đổi cả hai',
-  '/dance-styles cho xem các kiểu vẽ cạnh nhau.',
+  '  /dance on 6          cả hai',
+  'Cài đặt được lưu, dùng cho mọi phiên sau.',
 ].join('\n')
 
-// The side-by-side test of the styles: entry, label. A tree carries 100,000
-// characters of Client props in all, so each sample keeps its first ten
-// seconds.
-const SAMPLES: [string, string][][] = [
-  [
-    ['half-4', '1 · half'],
-    ['sextant-4', '2 · sextant'],
-    ['octant-4', '3 · octant'],
-    ['braille-4', '4 · braille'],
-  ],
-  [
-    ['half-8', '5 · half, 8'],
-    ['octant-8', '6 · octant, 8'],
-  ],
-]
+// The menu's look at her keeps her first ten seconds at most.
 const SAMPLE_FRAMES = 120
 // A Client's props carry 100,000 characters at most, and a tall dancer's 418
 // frames many more: she is handed a window of the dance, as many frames as
@@ -338,6 +444,12 @@ function layout(text: string, columns: number, margin: number): number[] | null 
       rows.push(2 + hang + w)
     }
     isAfterBlank = false
+    // The terminal draws a blank row under a heading, a blank line after it
+    // in the text or not (2.1.332).
+    if (heading) {
+      rows.push(0)
+      isAfterBlank = true
+    }
   }
   if (!flushTable()) {
     return null
@@ -347,6 +459,25 @@ function layout(text: string, columns: number, margin: number): number[] | null 
   }
 
   return rows
+}
+
+// The rows of a message whose guess missed the `length` rows laid out by
+// `drift`: each row as wide as any guessed row that a miss anywhere above it
+// could have shifted into it (a row more either way, for misses that part
+// cancel out), a row the guess does not reach as wide as `full`.
+function blurred(rows: number[], length: number, drift: number, full: number): number[] {
+  const lo = Math.min(0, drift) - 1
+  const hi = Math.max(0, drift) + 1
+
+  return Array.from({ length }, (_, row) => {
+    let used = 0
+    for (let shift = lo; shift <= hi; shift++) {
+      const from = row - shift
+      used = Math.max(used, from < 0 ? 0 : (rows[from] ?? full))
+    }
+
+    return used
+  })
 }
 
 // ---- a diff's rows, from its patch ------------------------------------------
@@ -401,6 +532,23 @@ function hash(s: string): number {
   return h >>> 0
 }
 
+// Her `rows` rows from `top` in runs of one ground (`bands`, a diff's red and
+// green), top to bottom.
+function runsOf(bands: readonly (string | undefined)[] | undefined, top: number, rows: number): Run[] {
+  const runs: Run[] = []
+  for (let row = 0; row < rows; row++) {
+    const band = bands?.[top + row]
+    const last = runs[runs.length - 1]
+    if (last !== undefined && last.band === band) {
+      last.to = row + 1
+    } else {
+      runs.push({ from: row, to: row + 1, band })
+    }
+  }
+
+  return runs
+}
+
 // Rows a spot takes: her box, and her stand's row under it.
 function tallOf(spot: Spot, box: Size): number {
   return box.rows + (spot.stand ? 1 : 0)
@@ -416,14 +564,19 @@ function footing(spot: Spot): number {
 // of `right`, kept apart from one another, the best footing first, then the
 // roomiest: on her stand where the row under her is clear as well, resting
 // on a line of words that runs under the stand or else floating; straight on
-// a line of words where that line is the row under her. She walks the right
-// end of the room, ROAM columns at most. Returned top to bottom.
-function findSpots(rows: number[], right: number, box: Size): Spot[] {
+// a line of words where that line is the row under her. Where no words are
+// sure to be under her (`rules.canGround` false), floating on her stand alone.
+// She walks the right end of the room, ROAM columns at most. Returned top to
+// bottom.
+function findSpots(rows: number[], right: number, box: Size, rules: Rules): Spot[] {
   const found: Spot[] = []
   const hi = right - EDGE - box.cols
   // The row under her is inside the message: words to stand on, or room for
   // the stand.
   for (let top = 0; top + box.rows < rows.length; top++) {
+    if (!rules.fits(top)) {
+      continue
+    }
     let used = 0
     for (let r = top; r < top + box.rows; r++) {
       used = Math.max(used, rows[r] ?? 0)
@@ -432,7 +585,7 @@ function findSpots(rows: number[], right: number, box: Size): Spot[] {
     const below = rows[top + box.rows] ?? 0
     const clear = Math.max(lo, below + GAP)
     if (hi >= clear) {
-      const onGround = Math.min(hi, (rows[top + box.rows + 1] ?? 0) - box.cols)
+      const onGround = rules.canGround ? Math.min(hi, (rows[top + box.rows + 1] ?? 0) - box.cols) : -1
       found.push(
         onGround >= clear
           ? { top, from: Math.max(clear, onGround - ROAM), to: onGround, stand: true, ground: true }
@@ -440,7 +593,7 @@ function findSpots(rows: number[], right: number, box: Size): Spot[] {
       )
     }
     const onWords = Math.min(hi, below - box.cols)
-    if (onWords >= lo) {
+    if (rules.canGround && onWords >= lo) {
       found.push({ top, from: Math.max(lo, onWords - ROAM), to: onWords, stand: false, ground: true })
     }
   }
@@ -483,8 +636,11 @@ function isSame(a: Spot, b: Spot): boolean {
 
 // What one load of the module keeps between drawings.
 type Kami = {
+  // The settings this load was given, and the ones changed since, written to
+  // their /config rows and drawn in the menu until the reload brings them.
+  settings: Settings
+  pending: Partial<Settings>
   size: string
-  style: string
   hasWalkSet: boolean
   sites: Map<string, Site>
   log: string[]
@@ -502,6 +658,9 @@ type Kami = {
   // for that redraw before the next frame is swapped in.
   drawnCell: number | null
   drawnStand: number
+  // The keys of the pictures she is drawn in now, a strip each: what a tick
+  // swaps to the next frame.
+  pictureKeys: string[]
   awaitTicks: number
   isOn: boolean
   hasWarned: boolean
@@ -512,7 +671,7 @@ type Kami = {
   // Right margin of the text column and the extra rows below a message, as
   // learned from messages whose guess matched.
   fit: { margin: number; extra: number } | null
-  // Each sprite read (assets/sprites/<style>-<height>.json), by its name.
+  // Each sprite read (assets/sprites/sextant-<height>.json), by its name.
   spriteLoads: Map<string, Promise<Sprite | null>>
   // The longest frame of each sprite read, in characters.
   longest: Map<string, number>
@@ -592,7 +751,8 @@ function keepWalk(k: Kami, spot: Spot) {
 }
 
 // One tick: dance in place, or a quarter column on to where she walks; once
-// there, a pause, then a new place at least STRIDE columns off.
+// there, a pause, then a new place at least STRIDE columns off. With walking
+// off she ends the step she is in and stays.
 function stepWalk(k: Kami, spot: Spot) {
   const walk = k.walk
   if (walk.wait > 0) {
@@ -601,6 +761,9 @@ function stepWalk(k: Kami, spot: Spot) {
   }
   if (walk.at !== walk.to) {
     walk.at += Math.sign(walk.to - walk.at)
+    return
+  }
+  if ((k.pending.walk ?? k.settings.walk) === 'off') {
     return
   }
   walk.wait = PAUSE_MIN + random(k, PAUSE_SPREAD)
@@ -612,6 +775,65 @@ function stepWalk(k: Kami, spot: Spot) {
   }
   const pick = random(k, left + right)
   walk.to = (pick < left ? spot.from + pick : here + STRIDE + pick - left) * 4
+}
+
+function setShown($: EngineInterface, k: Kami, isOn: boolean) {
+  if (isOn === k.isOn) {
+    return
+  }
+  k.isOn = isOn
+  k.host = null
+  k.drawnCell = null
+  $.ui.invalidate('ui.render')
+}
+
+// Writes each of `wanted` that differs from what is set to the mod's /config
+// row, which reloads the mod with it. Meanwhile the menu draws it, and
+// showing, hiding and walking take it at once. Answers the first refusal, in
+// words, the settings after it left unwritten; else undefined.
+async function saveSettings(
+  $: EngineInterface,
+  k: Kami,
+  wanted: Partial<Record<Field, string | undefined>>,
+): Promise<string | undefined> {
+  const now: Settings = { ...k.settings, ...k.pending }
+  const changes: [Field, string][] = []
+  for (const { field } of SETTINGS) {
+    const value = wanted[field]
+    if (value !== undefined && value !== now[field]) {
+      changes.push([field, value])
+      k.pending[field] = value
+    }
+  }
+  if (changes.length === 0) {
+    return undefined
+  }
+  if (wanted.show !== undefined) {
+    setShown($, k, wanted.show !== 'off')
+  }
+  $.ui.invalidate('ui.render')
+  const rows = await $.config.list().catch(() => [])
+  const keyOf = (field: Field): string | undefined =>
+    rows.find(row => row.key === `${$.plugin.name}.${field}`)?.key ??
+    rows.find(row => row.key.startsWith($.plugin.name) && row.key.endsWith(`.${field}`))?.key
+  for (const [i, [field, value]] of changes.entries()) {
+    const key = keyOf(field)
+    const answer = key === undefined ? { deny: 'không thấy dòng cài đặt' } : await $.config.set({ key, value })
+    if (answer.deny !== undefined) {
+      for (const [left] of changes.slice(i)) {
+        delete k.pending[left]
+      }
+      setShown($, k, (k.pending.show ?? k.settings.show) !== 'off')
+      $.ui.invalidate('ui.render')
+      const label = SETTINGS.find(setting => setting.field === field)?.label ?? field
+      note(k, `setting ${field}=${value} refused: ${answer.deny}`)
+
+      return `Không lưu được “${label}”: ${answer.deny}`
+    }
+    note(k, `setting ${field}=${value}`)
+  }
+
+  return undefined
 }
 
 function blitAnswered(k: Kami, answer: { deny?: string }) {
@@ -629,7 +851,7 @@ function blitAnswered(k: Kami, answer: { deny?: string }) {
   }
 }
 
-// A sprite, read once: assets/sprites/<style>-<height>.json, which
+// A sprite, read once: assets/sprites/sextant-<height>.json, which
 // tools/blocks.py builds.
 function spriteOf($: EngineInterface, k: Kami, entry: string): Promise<Sprite | null> {
   let load = k.spriteLoads.get(entry)
@@ -660,7 +882,8 @@ function frameNow(fps: number, total: number): number {
   return Math.floor((Date.now() * fps) / 1000) % total
 }
 
-// The message's rows as laid out, when the guess matches the engine's count.
+// The message's rows as laid out, when the guess matches the engine's count;
+// else, missing it by DRIFT rows at most, the rows blurred over the miss.
 function messageRows(k: Kami, site: Site, laidOut: number): Laid | null {
   const tries: { margin: number; extra: number }[] = []
   if (k.fit) {
@@ -685,8 +908,16 @@ function messageRows(k: Kami, site: Site, laidOut: number): Laid | null {
       return { rows: t.extra < 0 ? rows.slice(1) : rows, bands: [], right: site.columns }
     }
   }
+  const t = k.fit ?? { margin: 0, extra: 0 }
+  const rows = layout(site.key, site.columns, t.margin)
+  const drift = rows === null ? Infinity : laidOut - (rows.length + t.extra)
+  if (rows === null || Math.abs(drift) > DRIFT) {
+    return null
+  }
+  const guessed = t.extra < 0 ? rows.slice(1) : rows
+  note(k, `${site.id.slice(0, 8)} guess ${guessed.length} misses laid ${laidOut} by ${drift}: loose`)
 
-  return null
+  return { rows: blurred(guessed, laidOut, drift, site.columns), bands: [], right: site.columns, isLoose: true }
 }
 
 // She stays while any row of her spot is on screen. Else the spot to take,
@@ -716,6 +947,27 @@ function pickHost(k: Kami, box: Size): Host | null {
   return best?.host ?? null
 }
 
+// Whether this terminal draws real pictures (kitty, Ghostty, or forced).
+function terminalSeesPictures($: EngineInterface, k: Kami): Promise<boolean> {
+  k.picturesLoad ??= Promise.all([
+    $.env.get('KITTY_WINDOW_ID'),
+    $.env.get('TERM'),
+    $.env.get('TERM_PROGRAM'),
+    $.env.get('CLAUDE_CODE_FORCE_TERMINAL_IMAGES'),
+  ]).then(
+    values => seesPictures(k, values),
+    () => false,
+  )
+
+  return k.picturesLoad
+}
+
+// Whether she is drawn as a real picture: where the terminal draws one,
+// unless the person turned pictures off.
+async function picturesOf($: EngineInterface, k: Kami): Promise<boolean> {
+  return k.settings.pictures !== 'off' && (await terminalSeesPictures($, k))
+}
+
 // Whether she can be drawn in this terminal, and how; starts her clock.
 async function lookFor($: EngineInterface, k: Kami, viewport: Drawing['viewport']): Promise<Look | null> {
   if (viewport?.isFullscreen === false) {
@@ -729,24 +981,15 @@ async function lookFor($: EngineInterface, k: Kami, viewport: Drawing['viewport'
 
     return null
   }
-  k.picturesLoad ??= Promise.all([
-    $.env.get('KITTY_WINDOW_ID'),
-    $.env.get('TERM'),
-    $.env.get('TERM_PROGRAM'),
-    $.env.get('CLAUDE_CODE_FORCE_TERMINAL_IMAGES'),
-  ]).then(
-    values => seesPictures(k, values),
-    () => false,
-  )
-  const isPicture = await k.picturesLoad
+  const isPicture = await picturesOf($, k)
   const root = $.plugin.root
   const tall = Number(k.size) || 4
   let sprite: Sprite | null = null
-  let entry = `${k.style}-${k.size}`
+  let entry = `${STYLE}-${k.size}`
   if (!isPicture) {
     sprite = await spriteOf($, k, entry)
     if (sprite === null) {
-      entry = 'half-4'
+      entry = `${STYLE}-4`
       sprite = await spriteOf($, k, entry)
     }
   }
@@ -801,12 +1044,13 @@ function tick($: EngineInterface, k: Kami, isPicture: boolean, isQuartered: bool
     return
   }
   const quarter = isQuartered ? k.walk.at % 4 : 0
-  void $.ui
-    .blit({ requestId: here.id, key: 'dancer', source: { file: frameOf(k, root, k.frame, quarter), format: 'png' } })
-    .then(
+  const file = frameOf(k, root, k.frame, quarter)
+  for (const key of k.pictureKeys) {
+    void $.ui.blit({ requestId: here.id, key, source: { file, format: 'png' } }).then(
       answer => blitAnswered(k, answer),
       (err: unknown) => blitAnswered(k, { deny: String(err) }),
     )
+  }
   if (isQuartered && here.spot.stand && quarter !== k.drawnStand) {
     k.drawnStand = quarter
     void $.ui
@@ -826,9 +1070,10 @@ function visit(
   kind: Kind,
   key: string,
   at: Drawing,
-  box: Size,
+  look: Look,
   guess: (site: Site, laidOut: number) => Laid | null,
 ): { site: Site; spot: Spot } | null {
+  const { box } = look
   const id = at.requestId
   const columns = at.viewport?.columns ?? 0
   let site = k.sites.get(id)
@@ -866,7 +1111,14 @@ function visit(
 
   if (site.spots === undefined && site.laidOut !== undefined) {
     const laid = guess(site, site.laidOut)
-    site.spots = laid === null ? [] : findSpots(laid.rows, laid.right, box)
+    // A picture over a diff's coloured rows is drawn a strip a run of one
+    // colour: STRIPS at most.
+    const isPicture = look.sprite === null
+    const rules: Rules = {
+      canGround: laid?.isLoose !== true,
+      fits: top => !isPicture || runsOf(laid?.bands, top, box.rows).length <= STRIPS,
+    }
+    site.spots = laid === null ? [] : findSpots(laid.rows, laid.right, box, rules)
     site.bands = laid?.bands
     const spots = site.spots.map(
       spot => `${spot.top},${spot.from}-${spot.to}${spot.stand ? '+stand' : ''}${spot.ground ? '+ground' : ''}`,
@@ -874,7 +1126,7 @@ function visit(
     note(
       k,
       `#${site.seq} ${kind} ${id.slice(0, 8)} cols ${columns} laid ${site.laidOut} ` +
-        `guess ${laid?.rows.length ?? 'none'} spots ${spots.join(' ') || 'none'}`,
+        `guess ${laid?.rows.length ?? 'none'}${laid?.isLoose ? ' loose' : ''} spots ${spots.join(' ') || 'none'}`,
     )
   }
 
@@ -923,15 +1175,34 @@ function overlay(k: Kami, parts: Parts, look: Look, site: Site, spot: Spot): Ren
   const bandOf = (row: number): string | undefined => site.bands?.[spot.top + row]
   let dancer: RenderNode
   if (sprite === null) {
-    dancer = (
-      <Image
-        key="dancer"
-        source={{ file: frameOf(k, root, k.frame, quarter), format: 'png' }}
-        columns={box.cols}
-        rows={box.rows}
-        alt=" "
-      />
-    )
+    // Her picture over each run of rows of one ground: the whole picture in a
+    // box of that ground that shows only its rows, so the clear pixels show
+    // the row's colour, not the terminal's.
+    const source = { file: frameOf(k, root, k.frame, quarter), format: 'png' }
+    const runs = runsOf(site.bands, spot.top, box.rows)
+    const keys = runs.map((_, i) => (i === 0 ? 'dancer' : `dancer-${i}`))
+    k.pictureKeys = keys
+    const picture = (key: string) => <Image key={key} source={source} columns={box.cols} rows={box.rows} alt=" " />
+    dancer =
+      runs.length === 1 && runs[0]?.band === undefined ? (
+        picture('dancer')
+      ) : (
+        <Box flexDirection="column" width={box.cols} height={box.rows} flexShrink={0}>
+          {runs.map((run, i) => (
+            <Box
+              width={box.cols}
+              height={run.to - run.from}
+              flexShrink={0}
+              overflow="hidden"
+              backgroundColor={run.band}
+            >
+              <Box marginTop={-run.from} flexShrink={0}>
+                {picture(keys[i] ?? 'dancer')}
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      )
   } else {
     const grounds = Array.from({ length: box.rows }, (_, row) => bandOf(row) ?? null)
     const hasGrounds = grounds.some(ground => ground !== null)
@@ -956,19 +1227,52 @@ function overlay(k: Kami, parts: Parts, look: Look, site: Site, spot: Spot): Ren
   const standBand = bandOf(box.rows)
   const barWidth = Math.max(3, Math.round(box.cols * 0.6))
   const barLeft = Math.floor((box.cols - barWidth) / 2)
-  const bars = ' '.repeat(barLeft) + '▔'.repeat(barWidth) + (standBand ? ' '.repeat(box.cols - barLeft - barWidth) : '')
+  const bars = ' '.repeat(barLeft) + '▔'.repeat(barWidth) + ' '.repeat(box.cols - barLeft - barWidth)
   const stand = !spot.stand ? null : isQuartered ? (
-    <Image key="stand" source={{ file: standOf(k, root, quarter), format: 'png' }} columns={box.cols} rows={1} alt=" " />
+    <Box width={box.cols} height={1} flexShrink={0} backgroundColor={standBand}>
+      <Image key="stand" source={{ file: standOf(k, root, quarter), format: 'png' }} columns={box.cols} rows={1} alt=" " />
+    </Box>
   ) : (
     <Text key="stand" color={STAND_COLOR} backgroundColor={standBand}>
       {bars}
     </Text>
   )
+  // The box of her whole walk, in the row's flow after the engine's drawing,
+  // `laid` rows tall: pulled up to her top row, and the rows she takes given
+  // back under her. It writes every cell of the walk, room either side of her
+  // as spaces on the row's ground, so a step leaves nothing of her behind: the
+  // terminal does not wipe what a box in the flow drew where it no longer is,
+  // as it does for an absolute one.
+  const tall = tallOf(spot, box)
+  const laid = site.laidOut ?? spot.top + tall
+  const at = Math.min(spot.to, Math.max(spot.from, cell))
+  const room = (key: string, width: number) =>
+    width <= 0 ? null : (
+      <Box key={key} flexDirection="column" width={width} height={tall} flexShrink={0}>
+        {Array.from({ length: tall }, (_, row) => (
+          <Text backgroundColor={bandOf(row)}>{' '.repeat(width)}</Text>
+        ))}
+      </Box>
+    )
 
   return (
-    <Box key="spot" position="absolute" top={spot.top - k.treeOffset[site.kind]} left={cell} flexDirection="column">
-      {dancer}
-      {stand}
+    <Box
+      key="spot"
+      flexDirection="row"
+      flexShrink={0}
+      alignSelf="flex-start"
+      width={spot.to - spot.from + box.cols}
+      height={tall}
+      marginTop={spot.top - laid}
+      marginBottom={laid - spot.top - tall}
+      marginLeft={spot.from}
+    >
+      {room('before', at - spot.from)}
+      <Box flexDirection="column" width={box.cols} height={tall} flexShrink={0}>
+        {dancer}
+        {stand}
+      </Box>
+      {room('after', spot.to - at)}
     </Box>
   )
 }
@@ -976,11 +1280,12 @@ function overlay(k: Kami, parts: Parts, look: Look, site: Site, spot: Spot): Ren
 // ---- the module -------------------------------------------------------------
 
 export const register: Register = (on, options) => {
-  const size = typeof options.size === 'string' ? options.size : '4'
+  const settings = settingsOf(options)
   const k: Kami = {
-    size,
-    style: typeof options.style === 'string' ? options.style : 'half',
-    hasWalkSet: WALK_SETS.has(size),
+    settings,
+    pending: {},
+    size: settings.size,
+    hasWalkSet: WALK_SETS.has(settings.size),
     sites: new Map(),
     log: [],
     isLogDirty: false,
@@ -991,8 +1296,9 @@ export const register: Register = (on, options) => {
     seed: 1,
     drawnCell: null,
     drawnStand: 0,
+    pictureKeys: ['dancer'],
     awaitTicks: 0,
-    isOn: true,
+    isOn: settings.show !== 'off',
     hasWarned: false,
     treeOffset: { message: 0, diff: 0 },
     fit: null,
@@ -1011,10 +1317,9 @@ export const register: Register = (on, options) => {
     k.logPath = (await $.env.get('KAMI_DANCE_LOG')) || undefined
     await $.command.register({
       name: 'dance',
-      description: 'Show or hide the dancing girl, or set her height and drawing style',
-      argumentHint: '[on|off] [3-15] [half|sextant|octant|braille]',
+      description: 'Open the dancing girl’s settings, or set them: on/off, height',
+      argumentHint: '[on|off] [3-15] (none: the settings menu)',
     })
-    await $.command.register({ name: 'dance-styles', description: 'Show the dancer in each drawing style side by side' })
     $.clock.every(2000, () => {
       const path = k.logPath
       if (k.isLogDirty && path) {
@@ -1022,118 +1327,208 @@ export const register: Register = (on, options) => {
         void $.fs.write(path, `${k.log.join('\n')}\n`).catch(() => undefined)
       }
     })
+    // A reload (a setting changed) draws the open menu again with what it brought.
+    $.ui.invalidate('ui.render')
 
     return next(e)
   })
 
-  // `/dance` shows or hides her; `/dance 6 octant` (either word, any order)
-  // sets her height and style in the mod's own /config rows, which reloads
-  // the mod with them.
+  // `/dance` alone opens the settings menu, and closes it when open;
+  // `/dance off`, `/dance 6`, `/dance on 6` (either word, any order) set
+  // those settings straight away.
   on('command.run', { command: 'dance' }, async ($, e) => {
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (words.length === 0) {
+      if ((await $.ui.panes()).some(pane => pane.id === SETTINGS_PANE)) {
+        await $.ui.close({ id: SETTINGS_PANE })
+
+        return { text: 'Đã đóng bảng cài đặt của cô bé.' }
+      }
+      await $.ui.open({
+        id: SETTINGS_PANE,
+        title: 'kami-dance: cài đặt',
+        focus: true,
+        closeOnEscape: true,
+        rows: 24,
+        columns: 60,
+      })
+
+      return { text: 'Đã mở bảng cài đặt của cô bé. Tab hoặc mũi tên để đi, Enter để chọn, Esc hoặc /dance để đóng.' }
+    }
     const sizes = words.filter(word => SIZES.includes(word))
-    const styles = words.filter(word => STYLES.includes(word))
     const shows: string[] = words.filter(word => word === 'on' || word === 'off')
-    const unknown = words.filter(word => !sizes.includes(word) && !styles.includes(word) && !shows.includes(word))
-    if (unknown.length > 0 || sizes.length > 1 || styles.length > 1 || shows.length > 1) {
+    const unknown = words.filter(word => !sizes.includes(word) && !shows.includes(word))
+    if (unknown.length > 0 || sizes.length > 1 || shows.length > 1) {
       return { text: DANCE_HELP }
     }
-    const show = shows[0]
-    if (words.length === 0 || show !== undefined) {
-      const isOn = show === undefined ? !k.isOn : show === 'on'
-      if (isOn !== k.isOn) {
-        k.isOn = isOn
-        k.host = null
-        k.drawnCell = null
-        $.ui.invalidate('ui.render')
-      }
-      if (sizes.length === 0 && styles.length === 0) {
-        return { text: k.isOn ? 'Cô bé nhảy múa: bật' : 'Cô bé nhảy múa: tắt' }
-      }
+    const before = { ...k.settings, ...k.pending }
+    const deny = await saveSettings($, k, { show: shows[0], size: sizes[0] })
+    if (deny !== undefined) {
+      return { text: deny }
     }
-    const rows = await $.config.list()
-    const keyOf = (field: string): string | undefined =>
-      rows.find(row => row.key === `${$.plugin.name}.${field}`)?.key ??
-      rows.find(row => row.key.startsWith($.plugin.name) && row.key.endsWith(`.${field}`))?.key
-    const changes: [string, string][] = []
-    if (sizes[0] !== undefined && sizes[0] !== k.size) {
-      changes.push(['size', sizes[0]])
+    const now = { ...k.settings, ...k.pending }
+    if (sizes.length === 0) {
+      return { text: `Cô bé nhảy múa: ${choiceOf('show', now.show)}` }
     }
-    if (styles[0] !== undefined && styles[0] !== k.style) {
-      changes.push(['style', styles[0]])
+    if (now.size === before.size) {
+      return { text: `Cô bé đã cao ${now.size} dòng.` }
     }
-    if (changes.length === 0) {
-      return { text: `Cô bé đã cao ${k.size} dòng, kiểu ${k.style}.` }
-    }
-    for (const [field, value] of changes) {
-      const key = keyOf(field)
-      const answer = key === undefined ? { deny: 'không thấy dòng cài đặt' } : await $.config.set({ key, value })
-      if (answer.deny !== undefined) {
-        return { text: `Không đổi được ${field === 'size' ? 'chiều cao' : 'kiểu vẽ'}: ${answer.deny}` }
-      }
-    }
-    const size = sizes[0] ?? k.size
-    const style = styles[0] ?? k.style
 
-    return { text: `Cô bé: cao ${size} dòng, kiểu ${style}. Mod nạp lại với cài đặt mới.` }
+    return { text: `Cô bé: cao ${now.size} dòng. Mod nạp lại với cài đặt mới.` }
   })
 
-  on('command.run', { command: 'dance-styles' }, async $ => {
-    if ((await $.ui.panes()).some(pane => pane.id === STYLES_PANE)) {
-      await $.ui.close({ id: STYLES_PANE })
-
-      return { text: 'Đã đóng bảng kiểu vẽ.' }
+  // The settings menu: a row a setting, each choice a button, the one set
+  // marked; under it, how she is drawn here and a look at her as set.
+  on('ui.render', { component: 'Pane', requestId: SETTINGS_PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const now: Settings = { ...k.settings, ...k.pending }
+    const pick = (field: Field, value: string) => async () => {
+      const deny = await saveSettings($, k, { [field]: value })
+      if (deny !== undefined) {
+        $.ui.toast(`kami-dance: ${deny}`, { timeoutMs: 8000 })
+      }
     }
-    await $.ui.open({ id: STYLES_PANE, title: 'kami-dance: kiểu vẽ' })
+    const control = (setting: Setting, isFirst: boolean) => {
+      const value = now[setting.field]
+      if (setting.field === 'size') {
+        const at = SIZES.indexOf(value)
+        const step = (by: number) => {
+          const to = SIZES[at + by]
+          return to === undefined ? () => undefined : pick('size', to)
+        }
 
-    return { text: 'Đã mở bảng kiểu vẽ. Gõ /dance-styles lần nữa để đóng.' }
-  })
+        return (
+          <Box flexDirection="row" columnGap={1}>
+            <Button key="size-down" dimColor={at <= 0} onPress={step(-1)}>
+              −
+            </Button>
+            <Text color={STAND_COLOR} bold>
+              {`${value} dòng`}
+            </Text>
+            <Button key="size-up" dimColor={at >= SIZES.length - 1} onPress={step(1)}>
+              +
+            </Button>
+            <Text dimColor>(3 đến 15)</Text>
+          </Box>
+        )
+      }
 
-  on('ui.render', { component: 'Pane', requestId: STYLES_PANE }, async ($, e) => {
+      return (
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2} flexShrink={1}>
+          {setting.choices.map(choice => {
+            const isSet = choice.value === value
+
+            return (
+              <Button
+                key={`${setting.field}-${choice.value}`}
+                plain
+                {...(isFirst && isSet ? { autoFocus: true as const } : {})}
+                onPress={pick(setting.field, choice.value)}
+              >
+                {isSet ? (
+                  <Text color={STAND_COLOR} bold>
+                    {`● ${choice.label}`}
+                  </Text>
+                ) : (
+                  <Text dimColor>{`○ ${choice.label}`}</Text>
+                )}
+              </Button>
+            )
+          })}
+        </Box>
+      )
+    }
+
+    const rows = (
+      <Box flexDirection="column">
+        {SETTINGS.map((setting, i) => (
+          <Box flexDirection="row">
+            <Box width={LABEL_COLS} flexShrink={0}>
+              <Text bold>{setting.label}</Text>
+            </Box>
+            {control(setting, i === 0)}
+          </Box>
+        ))}
+      </Box>
+    )
+    const buttons = (
+      <Box flexDirection="row" columnGap={2} marginTop={1}>
+        <Button key="close" role="dismiss" onPress={() => void $.ui.close({ id: SETTINGS_PANE })}>
+          đóng
+        </Button>
+      </Box>
+    )
+    const help = <Text dimColor>Tab hoặc mũi tên: đi giữa các nút · Enter: chọn · Esc: đóng</Text>
     if (e.surface !== 'terminal') {
-      const { Text } = $.ui.resolve(e)
-
-      return <Text>The dancer draws in the terminal only.</Text>
+      return (
+        <Box flexDirection="column">
+          {rows}
+          {buttons}
+        </Box>
+      )
     }
-    const { Box, Client, Text } = $.ui.resolve(e)
-    const entries = SAMPLES.flat().map(([entry]) => entry)
-    const loaded = await Promise.all(entries.map(entry => spriteOf($, k, entry)))
-    const catalog = new Map(entries.map((entry, i) => [entry, loaded[i]]))
-    if (loaded.every(sprite => sprite === null)) {
-      return <Text>Không đọc được hình trong assets/sprites.</Text>
+
+    // How she is drawn in this terminal with these settings, and a look at
+    // her as set: a picture's first frame, or the block characters dancing.
+    const { Client, Image } = $.ui.resolve(e)
+    const canPicture = await terminalSeesPictures($, k)
+    const isPicture = canPicture && now.pictures !== 'off'
+    const drawnAs = isPicture
+      ? 'Terminal này vẽ ảnh thật, nên cô là ảnh thật.'
+      : canPicture
+        ? 'Ảnh thật tắt: cô được vẽ bằng ký tự khối (sextant).'
+        : 'Terminal này không vẽ ảnh thật: cô được vẽ bằng ký tự khối (sextant).'
+    const tall = Number(now.size) || 4
+    let preview: RenderNode | null = null
+    if (isPicture) {
+      const cols = Math.max(1, Math.round(tall * 2 * PICTURE_ASPECT))
+      preview = (
+        <Image
+          key="preview"
+          source={{ file: `${$.plugin.root}/assets/png/f0000.png`, format: 'png' }}
+          columns={cols}
+          rows={tall}
+          alt=" "
+        />
+      )
+    } else {
+      const entry = `${STYLE}-${now.size}`
+      const sprite = await spriteOf($, k, entry)
+      if (sprite !== null) {
+        const count = Math.max(1, Math.floor(WINDOW_CHARS / (k.longest.get(entry) ?? 1)))
+        const sample = { ...sprite, frames: sprite.frames.slice(0, Math.min(SAMPLE_FRAMES, count)) }
+        preview = (
+          <Client
+            key={`preview-${entry}`}
+            module="./dancer.tsx"
+            props={sample}
+            width={sprite.cols}
+            height={sprite.rows}
+          />
+        )
+      }
     }
 
     return (
       <Box flexDirection="column">
-        <Text>Ô nào hiện dấu hỏi, ô vuông rỗng hay chữ lạ là terminal không vẽ được kiểu đó.</Text>
-        {SAMPLES.map(row => (
-          <Box flexDirection="row" marginTop={1}>
-            {row.map(([entry, label]) => {
-              const sprite = catalog.get(entry)
-              if (!sprite) {
-                return null
-              }
-              const sample = { ...sprite, frames: sprite.frames.slice(0, SAMPLE_FRAMES) }
-
-              return (
-                <Box flexDirection="column" marginRight={3}>
-                  <Client key={entry} module="./dancer.tsx" props={sample} width={sprite.cols} height={sprite.rows} />
-                  <Text dimColor>{label}</Text>
-                </Box>
-              )
-            })}
-          </Box>
-        ))}
-        <Text>
-          Đổi bằng /dance kèm chiều cao và kiểu, ví dụ /dance 6 octant (cao 3 đến 15 dòng; half, sextant, octant,
-          braille). Đang dùng: {k.style}, {k.size} dòng.
-        </Text>
+        {rows}
+        {buttons}
+        {help}
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>{drawnAs}</Text>
+          <Text dimColor>
+            Theme auto: Claude không cho mod biết nền terminal sáng hay tối; chọn đúng để màu quanh cô trong diff
+            khớp.
+          </Text>
+          <Text dimColor>Cài đặt được lưu cho mọi phiên sau; mỗi lần đổi, mod nạp lại.</Text>
+        </Box>
+        {preview !== null && <Box marginTop={1}>{preview}</Box>}
       </Box>
     )
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    if (e.surface !== 'terminal' || !k.isOn) {
+    if (e.surface !== 'terminal' || !k.isOn || k.settings.places === 'diffs') {
       return next(e)
     }
     const look = await lookFor($, k, e.viewport)
@@ -1141,7 +1536,7 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     const at = { requestId: e.requestId, viewport: e.viewport, onScreen: e.props.onScreen }
-    const here = visit($, k, 'message', e.props.text, at, look.box, (site, laidOut) => messageRows(k, site, laidOut))
+    const here = visit($, k, 'message', e.props.text, at, look, (site, laidOut) => messageRows(k, site, laidOut))
     if (here === null) {
       return next(e)
     }
@@ -1158,7 +1553,13 @@ export const register: Register = (on, options) => {
 
   // A file change's diff: its patch says what each row holds.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (e.surface !== 'terminal' || !k.isOn || !DIFF_TOOLS.has(e.props.tool) || e.props.isErrored) {
+    if (
+      e.surface !== 'terminal' ||
+      !k.isOn ||
+      k.settings.places === 'messages' ||
+      !DIFF_TOOLS.has(e.props.tool) ||
+      e.props.isErrored
+    ) {
       return next(e)
     }
     const output = e.props.output as { structuredPatch?: readonly Hunk[]; staged?: boolean } | undefined
@@ -1176,9 +1577,10 @@ export const register: Register = (on, options) => {
     k.groundsLoad ??= $.config.list().then(
       rows => {
         const theme = String(rows.find(row => row.key === 'theme')?.value ?? 'auto')
-        note(k, `theme ${theme}`)
+        const ground = theme === 'auto' ? k.settings.autoTheme : theme
+        note(k, `theme ${theme}${theme === 'auto' ? ` (as ${ground})` : ''}`)
 
-        return DIFF_GROUNDS[theme] ?? null
+        return DIFF_GROUNDS[ground] ?? null
       },
       () => null,
     )
@@ -1189,7 +1591,7 @@ export const register: Register = (on, options) => {
       return laid.rows.length === laidOut ? laid : null
     }
     const at = { requestId: e.requestId, viewport: e.viewport, onScreen: e.props.onScreen }
-    const here = visit($, k, 'diff', key, at, look.box, guess)
+    const here = visit($, k, 'diff', key, at, look, guess)
     if (here === null) {
       return next(e)
     }
